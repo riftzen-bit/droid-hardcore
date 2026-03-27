@@ -1,0 +1,8 @@
+{
+  "name": "droid-hardcore",
+  "description": "Hardcore TDD enforcement, anti-laziness protocol, and comprehensive quality gates for Factory Droid. Features ported from oh-my-claudecode and everything-claude-code.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Community"
+  }
+}

@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bash syntax check
+        run: |
+          echo "=== Checking bash syntax ==="
+          FAIL=0
+          for f in hooks/*.sh install.sh uninstall.sh; do
+            if bash -n "$f"; then
+              echo "OK: $f"
+            else
+              echo "FAIL: $f"
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      - name: Validate JSON files
+        run: |
+          echo "=== Validating JSON ==="
+          python3 -c "import json; json.load(open('.factory-plugin/plugin.json')); print('OK: plugin.json')"
+          python3 -c "import json; json.load(open('hooks/hooks.json')); print('OK: hooks.json')"
+
+      - name: Check for hardcoded paths
+        run: |
+          echo "=== Checking for hardcoded paths ==="
+          if grep -rn '/home/' hooks/ rules/ AGENTS.md install.sh uninstall.sh 2>/dev/null | grep -v '.github/'; then
+            echo "FAIL: Found hardcoded /home/ paths"
+            exit 1
+          fi
+          echo "CLEAN: No hardcoded paths"
+
+      - name: Check for secrets
+        run: |
+          echo "=== Scanning for secrets ==="
+          python3 -c '
+          import re, sys, os
+          patterns = [
+              r"AKIA[0-9A-Z]{16}",
+              r"sk-[a-zA-Z0-9]{32,}",
+              r"ghp_[a-zA-Z0-9]{36}",
+              r"-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----",
+          ]
+          found = False
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in [".git", "node_modules"]]
+              for fname in files:
+                  path = os.path.join(root, fname)
+                  try:
+                      content = open(path).read()
+                      for p in patterns:
+                          if re.search(p, content):
+                              print(f"FAIL: Secret pattern found in {path}")
+                              found = True
+                  except: pass
+          if found:
+              sys.exit(1)
+          print("CLEAN: No secrets found")
+          '
+
+      - name: Check for personal info
+        run: |
+          echo "=== Checking for personal info ==="
+          if grep -rni 'paul\|vietnamese\|non-programmer' hooks/ rules/ AGENTS.md 2>/dev/null; then
+            echo "FAIL: Personal info found"
+            exit 1
+          fi
+          echo "CLEAN: No personal info"
+
+      - name: Test hooks with simulated input
+        run: |
+          echo "=== Testing hooks ==="
+
+          echo '--- remind.sh ---'
+          echo '{"prompt":"test","session_id":"ci"}' | bash hooks/remind.sh 2>/dev/null | head -5
+          echo "OK: remind.sh"
+
+          echo '--- post-tool.sh (Edit) ---'
+          echo '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/test.ts"},"tool_output":"ok"}' | bash hooks/post-tool.sh 2>/dev/null | head -3
+          echo "OK: post-tool.sh"
+
+          echo '--- stop-guard.sh ---'
+          bash hooks/stop-guard.sh 2>/dev/null | head -3
+          echo "OK: stop-guard.sh"
+
+          echo '--- safety-check.sh (safe command) ---'
+          echo '{"tool_input":{"command":"echo hello"}}' | bash hooks/safety-check.sh 2>/dev/null
+          echo "OK: safety-check.sh"
+
+          echo '--- safety-check.sh (dangerous command) ---'
+          RESULT=$(echo '{"tool_input":{"command":"rm -rf /"}}' | bash hooks/safety-check.sh 2>/dev/null)
+          if echo "$RESULT" | grep -q "deny"; then
+            echo "OK: dangerous command blocked"
+          else
+            echo "FAIL: dangerous command not blocked"
+            exit 1
+          fi
+
+          echo '--- pre-write-guard.sh (clean content) ---'
+          echo '{"tool_name":"Create","tool_input":{"file_path":"/tmp/test.js","content":"const x = 1;"}}' | bash hooks/pre-write-guard.sh 2>/dev/null
+          echo "OK: pre-write-guard.sh"
+
+          echo '--- pre-compact.sh ---'
+          bash hooks/pre-compact.sh 2>/dev/null | head -2
+          echo "OK: pre-compact.sh"
+
+      - name: Install shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if [ "$(uname)" = "Darwin" ]; then
+              brew install shellcheck
+            else
+              sudo apt-get install -y shellcheck
+            fi
+          fi
+
+      - name: Shellcheck (advisory)
+        continue-on-error: true
+        run: |
+          echo "=== Shellcheck ==="
+          shellcheck -s bash -S warning hooks/*.sh install.sh uninstall.sh || true
+
+      - name: Verify all rules exist
+        run: |
+          echo "=== Checking rules ==="
+          EXPECTED=13
+          ACTUAL=$(ls rules/*.md | wc -l)
+          echo "Found $ACTUAL rule files (expected $EXPECTED)"
+          if [ "$ACTUAL" -lt "$EXPECTED" ]; then
+            echo "FAIL: Missing rule files"
+            exit 1
+          fi
+          echo "OK: All rules present"
