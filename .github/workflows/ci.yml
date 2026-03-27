@@ -10,8 +10,11 @@ jobs:
   validate:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +41,8 @@ jobs:
       - name: Validate JSON files
         run: |
           echo "=== Validating JSON ==="
-          python3 -c "import json; json.load(open('.factory-plugin/plugin.json')); print('OK: plugin.json')"
-          python3 -c "import json; json.load(open('hooks/hooks.json')); print('OK: hooks.json')"
+          python -c "import json; json.load(open('.factory-plugin/plugin.json')); print('OK: plugin.json')"
+          python -c "import json; json.load(open('hooks/hooks.json')); print('OK: hooks.json')"
 
       - name: Check for hardcoded paths
         run: |
@@ -53,7 +56,7 @@ jobs:
       - name: Check for secrets
         run: |
           echo "=== Scanning for secrets ==="
-          python3 -c '
+          python -c '
           import re, sys, os
           patterns = [
               r"AKIA[0-9A-Z]{16}",
@@ -125,6 +128,7 @@ jobs:
           echo "OK: pre-compact.sh"
 
       - name: Install shellcheck
+        if: runner.os != 'Windows'
         run: |
           if ! command -v shellcheck >/dev/null 2>&1; then
             if [ "$(uname)" = "Darwin" ]; then
@@ -133,6 +137,11 @@ jobs:
               sudo apt-get install -y shellcheck
             fi
           fi
+
+      - name: Install shellcheck (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install shellcheck -y
 
       - name: Shellcheck (advisory)
         continue-on-error: true
