@@ -92,6 +92,7 @@ jobs:
 
       - name: Test hooks with simulated input
         run: |
+          set +o pipefail
           echo "=== Testing hooks ==="
 
           echo '--- remind.sh ---'
@@ -111,6 +112,7 @@ jobs:
           echo "OK: safety-check.sh"
 
           echo '--- safety-check.sh (dangerous command) ---'
+          set -o pipefail
           RESULT=$(echo '{"tool_input":{"command":"rm -rf /"}}' | bash hooks/safety-check.sh 2>/dev/null)
           if echo "$RESULT" | grep -q "deny"; then
             echo "OK: dangerous command blocked"
@@ -118,6 +120,7 @@ jobs:
             echo "FAIL: dangerous command not blocked"
             exit 1
           fi
+          set +o pipefail
 
           echo '--- pre-write-guard.sh (clean content) ---'
           echo '{"tool_name":"Create","tool_input":{"file_path":"/tmp/test.js","content":"const x = 1;"}}' | bash hooks/pre-write-guard.sh 2>/dev/null
