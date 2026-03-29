@@ -124,12 +124,12 @@ jobs:
           echo "$OUTPUT" | grep -q "EXECUTION ERROR" && { echo "FAIL: false positive"; FAIL=1; } || echo "OK: no false positive"
 
           echo '--- stop-guard.sh (first fire blocks) ---'
-          echo '{"stop_hook_active":false}' | bash hooks/stop-guard.sh >/dev/null 2>/dev/null
-          [ $? -eq 2 ] && echo "OK: first fire exit 2" || { echo "FAIL: stop first fire"; FAIL=1; }
+          STOP_EXIT=0; echo '{"stop_hook_active":false}' | bash hooks/stop-guard.sh >/dev/null 2>/dev/null || STOP_EXIT=$?
+          [ "$STOP_EXIT" -eq 2 ] && echo "OK: first fire exit 2" || { echo "FAIL: stop first fire (got $STOP_EXIT)"; FAIL=1; }
 
           echo '--- stop-guard.sh (re-fire allows stop) ---'
-          echo '{"stop_hook_active":true}' | bash hooks/stop-guard.sh >/dev/null 2>/dev/null
-          [ $? -eq 0 ] && echo "OK: re-fire exit 0" || { echo "FAIL: infinite loop"; FAIL=1; }
+          STOP_EXIT2=0; echo '{"stop_hook_active":true}' | bash hooks/stop-guard.sh >/dev/null 2>/dev/null || STOP_EXIT2=$?
+          [ "$STOP_EXIT2" -eq 0 ] && echo "OK: re-fire exit 0" || { echo "FAIL: infinite loop (got $STOP_EXIT2)"; FAIL=1; }
 
           echo '--- pre-write-guard.sh (clean) ---'
           OUTPUT=$(echo '{"tool_name":"Create","tool_input":{"file_path":"/tmp/test.js","content":"const x = 1;"}}' | bash hooks/pre-write-guard.sh 2>/dev/null)
