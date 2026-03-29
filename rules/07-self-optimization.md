@@ -16,7 +16,16 @@ After significant tasks: Reflect -> Abstract pattern -> Write to rules/memories/
 When user corrects approach:
 1. Note the correction in memories.md immediately (include WHY + HOW TO APPLY)
 2. Check for contradicting rules — update if needed
-3. Never repeat same mistake
+3. Never repeat same mistake — this is absolute, not aspirational
+
+## Permanent Error Memory
+
+When a bug is fixed or a mistake is corrected:
+1. Record in memories.md under "## Lessons Learned": what, why, how fixed, prevention
+2. Before every new task: scan lessons for relevant past mistakes
+3. If the same class of error recurs: it is a CRITICAL failure — fix the rule, not just the code
+4. Patterns that caused bugs become permanent anti-patterns in rules/
+5. After web search fixes: record the solution source and pattern for reuse
 
 ## Config Health (silent check at session start)
 

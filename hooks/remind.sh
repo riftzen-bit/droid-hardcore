@@ -173,6 +173,9 @@ elif [ -f "$CWD/yarn.lock" ]; then
   PKG_MGR="yarn"
 elif [ -f "$CWD/package-lock.json" ]; then
   PKG_MGR="npm"
+elif [ -f "$CWD/package.json" ]; then
+  # Fallback: package.json exists but no lock file — assume npm
+  PKG_MGR="npm"
 fi
 
 # JS/TS detection
@@ -367,7 +370,21 @@ if [ -f "$COUNTER_FILE" ]; then
   fi
 fi
 
-# === Section 13: TASK MARKER (must be LAST section) ===
+# === Section 13: Zero Tolerance Contract (behavioral contract) ===
+cat <<'EOF'
+
+<zero-tolerance>
+TRUST CONTRACT — The user may not verify your work. You are the ONLY quality gate.
+- "Done" = VERIFIED with proof (show validator output). Not "I think it works."
+- Full context BEFORE coding: read all relevant files, understand architecture
+- Zero regressions: re-test EVERYTHING after every fix
+- Persistence: loop fixes until resolved (max 15 iterations). Search web if stuck after 3.
+- Never forget mistakes: record in memories.md, never repeat under any form
+- Honest: a truthful "still working" beats a false "done" every time
+</zero-tolerance>
+EOF
+
+# === Section 14: TASK MARKER (must be LAST section) ===
 # Mark where user's task begins. Do NOT echo the prompt (Factory shows it separately after).
 cat <<'EOF'
 

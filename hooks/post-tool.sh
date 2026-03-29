@@ -1,14 +1,23 @@
 #!/bin/bash
-# PostToolUse hook — auto-review + TDD enforcement + code quality after file edits
-# Checks: self-review, test file existence, console.log detection, format suggestion, UI verification
-# Also: bash history, tool call counting, tool failure tracking reset
+# PostToolUse hook — comprehensive post-tool enforcement system
+# CRITICAL: Uses JSON additionalContext output so Droid ACTUALLY sees warnings
+# (plain stdout only goes to transcript in Factory, not to Droid)
+#
+# Features: self-review, TDD enforcement, debug detection, AI comment detection,
+#   write-guard tracking, empty response detection, tool failure escalation,
+#   context degradation warnings, UI verification
 
 INPUT_JSON=$(cat)
 
 TOOL_NAME=$(echo "$INPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_name",""))' 2>/dev/null || echo "")
 TOOL_OUTPUT=$(echo "$INPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_output","")[:500])' 2>/dev/null || echo "")
 
-# === Tool call counter (increment on every tool use) ===
+WARNINGS=""
+add_warning() {
+  WARNINGS="${WARNINGS}${1}\n"
+}
+
+# === Tool call counter ===
 COUNTER_FILE="$HOME/.factory/.session-tool-count"
 if [ -f "$COUNTER_FILE" ]; then
   COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
@@ -17,11 +26,10 @@ else
   echo "1" > "$COUNTER_FILE"
 fi
 
-# === Tool failure tracking: reset on success ===
+# === Tool failure tracking ===
 FAILURE_FILE="$HOME/.factory/.last-tool-error.json"
 IS_ERROR=$(echo "$INPUT_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d.get("tool_error") else "false")' 2>/dev/null || echo "false")
 if [ "$IS_ERROR" = "true" ]; then
-  # Track failure
   PREV_TOOL=$(python3 -c "import json; print(json.load(open('$FAILURE_FILE')).get('tool',''))" 2>/dev/null || echo "")
   if [ "$PREV_TOOL" = "$TOOL_NAME" ]; then
     PREV_COUNT=$(python3 -c "import json; print(json.load(open('$FAILURE_FILE')).get('retry_count',0))" 2>/dev/null || echo "0")
@@ -35,83 +43,82 @@ with open('$FAILURE_FILE','w') as f:
     json.dump({'tool':'$TOOL_NAME','retry_count':$NEW_COUNT},f)
 " 2>/dev/null
   if [ "$NEW_COUNT" -ge 5 ] 2>/dev/null; then
-    echo "<tool-failure-escalation>"
-    echo "Tool '$TOOL_NAME' has failed ${NEW_COUNT}x. STOP retrying the same approach."
-    echo "Try: different arguments, alternative tool, or break the task into smaller steps."
-    echo "</tool-failure-escalation>"
+    add_warning "TOOL FAILURE ESCALATION: '$TOOL_NAME' failed ${NEW_COUNT}x. STOP retrying same approach. Try different arguments, alternative tool, or break task into smaller steps."
   fi
 else
-  # Success: reset failure tracker
   rm -f "$FAILURE_FILE" 2>/dev/null
 fi
 
+# === Write-Before-Read Guard: track reads ===
+READ_TRACKER="$HOME/.factory/.session-read-files"
 case "$TOOL_NAME" in
-  Edit|Create|ApplyPatch)
+  Read)
+    READ_PATH=$(echo "$INPUT_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin).get("tool_input",{}); print(d.get("file_path",d.get("path","")))' 2>/dev/null || echo "")
+    if [ -n "$READ_PATH" ]; then
+      echo "$READ_PATH" >> "$READ_TRACKER" 2>/dev/null
+    fi
+    ;;
+esac
+
+# === Empty Task Response Detection ===
+case "$TOOL_NAME" in
+  Task)
+    if [ -z "$TOOL_OUTPUT" ] || [ "$TOOL_OUTPUT" = "null" ] || [ "$TOOL_OUTPUT" = "{}" ]; then
+      add_warning "EMPTY TASK: Droid/subagent returned empty response. Task may have failed silently. Retry with more context or do it directly."
+    fi
+    ;;
+esac
+
+# === File Edit/Create checks ===
+case "$TOOL_NAME" in
+  Edit|Create|ApplyPatch|Write)
     FILE_PATH=$(echo "$INPUT_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin).get("tool_input",{}); print(d.get("file_path",d.get("path","")))' 2>/dev/null || echo "")
 
-    # Auto-review reminder
-    cat <<'EOF'
-<post-edit-review>
-File modified. Self-review checklist:
-- Re-read the edited file to verify correctness
-- Check for typos, logic errors, missing imports
-- Would a senior engineer approve this diff?
-</post-edit-review>
-EOF
+    # Write-before-read check (Edit only)
+    if [ "$TOOL_NAME" = "Edit" ] && [ -n "$FILE_PATH" ]; then
+      WAS_READ=false
+      if [ -f "$READ_TRACKER" ] && grep -qF "$FILE_PATH" "$READ_TRACKER" 2>/dev/null; then
+        WAS_READ=true
+      fi
+      if [ "$WAS_READ" = false ]; then
+        add_warning "WRITE GUARD: Editing $FILE_PATH without reading it first this session. Re-read to avoid stale edits."
+      fi
+    fi
 
-    # === Console.log / debug statement detection ===
+    add_warning "POST-EDIT: Re-read the edited file to verify correctness. Check for typos, logic errors, missing imports."
+
+    # Debug statement detection
     case "$FILE_PATH" in
       *.ts|*.tsx|*.js|*.jsx)
         if [ -f "$FILE_PATH" ]; then
-          CONSOLE_LINES=$(grep -n 'console\.\(log\|debug\|info\|warn\|error\)' "$FILE_PATH" 2>/dev/null | grep -v '// eslint-disable' | grep -v 'logger\.' | head -5)
-          if [ -n "$CONSOLE_LINES" ]; then
-            echo "<debug-statement-warning>"
-            echo "console.log/debug statements found in $FILE_PATH:"
-            echo "$CONSOLE_LINES"
-            echo "Remove before committing unless intentional logging."
-            echo "</debug-statement-warning>"
-          fi
+          CONSOLE_LINES=$(grep -n 'console\.\(log\|debug\|info\|warn\|error\)' "$FILE_PATH" 2>/dev/null | grep -v '// eslint-disable' | grep -v 'logger\.' | head -3)
+          [ -n "$CONSOLE_LINES" ] && add_warning "DEBUG STATEMENTS in $FILE_PATH: $CONSOLE_LINES — Remove before committing."
         fi
         ;;
       *.py)
         if [ -f "$FILE_PATH" ]; then
-          PRINT_LINES=$(grep -n '^\s*print(' "$FILE_PATH" 2>/dev/null | grep -v '# noqa' | head -5)
-          if [ -n "$PRINT_LINES" ]; then
-            echo "<debug-statement-warning>"
-            echo "print() statements found in $FILE_PATH:"
-            echo "$PRINT_LINES"
-            echo "Use logging module instead, or remove before committing."
-            echo "</debug-statement-warning>"
-          fi
+          PRINT_LINES=$(grep -n '^\s*print(' "$FILE_PATH" 2>/dev/null | grep -v '# noqa' | head -3)
+          [ -n "$PRINT_LINES" ] && add_warning "DEBUG STATEMENTS in $FILE_PATH: $PRINT_LINES — Use logging module instead."
         fi
         ;;
       *.go)
         if [ -f "$FILE_PATH" ]; then
-          FMT_LINES=$(grep -n 'fmt\.Print' "$FILE_PATH" 2>/dev/null | head -5)
-          if [ -n "$FMT_LINES" ]; then
-            echo "<debug-statement-warning>"
-            echo "fmt.Print statements found in $FILE_PATH:"
-            echo "$FMT_LINES"
-            echo "Use structured logging instead."
-            echo "</debug-statement-warning>"
-          fi
+          FMT_LINES=$(grep -n 'fmt\.Print' "$FILE_PATH" 2>/dev/null | head -3)
+          [ -n "$FMT_LINES" ] && add_warning "DEBUG STATEMENTS in $FILE_PATH: $FMT_LINES — Use structured logging."
         fi
         ;;
     esac
 
-    # === Auto-format suggestion ===
-    CWD=$(pwd)
-    case "$FILE_PATH" in
-      *.ts|*.tsx|*.js|*.jsx|*.css|*.scss|*.json)
-        if [ -f "$CWD/biome.json" ] || [ -f "$CWD/biome.jsonc" ]; then
-          echo "<format-suggestion>Consider running: npx biome check --write $FILE_PATH</format-suggestion>"
-        elif [ -f "$CWD/.prettierrc" ] || [ -f "$CWD/.prettierrc.json" ] || [ -f "$CWD/.prettierrc.js" ] || [ -f "$CWD/prettier.config.js" ] || [ -f "$CWD/prettier.config.mjs" ]; then
-          echo "<format-suggestion>Consider running: npx prettier --write $FILE_PATH</format-suggestion>"
-        fi
-        ;;
-    esac
+    # AI Comment Pattern Detection
+    if [ -f "$FILE_PATH" ]; then
+      AI_COMMENTS=$(grep -nE '//\s*(Initialize|Check if|Loop through|Handle the|Process the|Set up the|Create a new|Update the|Get the|Return the|Define the|Configure the|Validate the|Parse the|Import necessary|Export the|Declare|Iterate over|Ensure that|Fetch the|Calculate the|Convert the|Append the|Remove the|Sort the|Filter the|Map the|Reduce the|Increment|Decrement)' "$FILE_PATH" 2>/dev/null | head -3)
+      if [ -z "$AI_COMMENTS" ]; then
+        AI_COMMENTS=$(grep -nE '#\s*(Initialize|Check if|Loop through|Handle the|Process the|Set up the|Create a new|Update the|Get the|Return the|Define the|Configure the|Validate the|Parse the|Import necessary|Export the|Iterate over|Ensure that|Fetch the|Calculate the|Convert the|Append the|Remove the|Sort the|Filter the|Reduce the|Increment|Decrement)' "$FILE_PATH" 2>/dev/null | head -3)
+      fi
+      [ -n "$AI_COMMENTS" ] && add_warning "AI COMMENTS in $FILE_PATH: $AI_COMMENTS — Remove obvious WHAT comments, keep WHY comments."
+    fi
 
-    # === TDD ENFORCEMENT: Check for corresponding test file ===
+    # TDD ENFORCEMENT
     IS_TEST=false
     case "$FILE_PATH" in
       *.test.*|*.spec.*|*__tests__/*|*_test.go|*_test.py|test_*|*Test.java|*_test.rs) IS_TEST=true ;;
@@ -124,106 +131,71 @@ EOF
           BASENAME=$(basename "$FILE_PATH")
           NAME="${BASENAME%.*}"
           EXT="${BASENAME##*.}"
-
           FOUND_TEST=false
 
           case "$EXT" in
             ts|tsx|js|jsx)
-              for pattern in \
-                "$DIR/$NAME.test.$EXT" \
-                "$DIR/$NAME.spec.$EXT" \
-                "$DIR/$NAME.test.ts" \
-                "$DIR/$NAME.test.tsx" \
-                "$DIR/$NAME.spec.ts" \
-                "$DIR/$NAME.spec.tsx" \
-                "$DIR/__tests__/$NAME.$EXT" \
-                "$DIR/__tests__/$NAME.test.$EXT" \
-                "$DIR/../__tests__/$NAME.test.$EXT" \
-                "$DIR/../tests/$NAME.test.$EXT"; do
-                if [ -f "$pattern" ]; then
-                  FOUND_TEST=true
-                  break
-                fi
+              for pattern in "$DIR/$NAME.test.$EXT" "$DIR/$NAME.spec.$EXT" "$DIR/$NAME.test.ts" "$DIR/$NAME.test.tsx" "$DIR/$NAME.spec.ts" "$DIR/$NAME.spec.tsx" "$DIR/__tests__/$NAME.$EXT" "$DIR/__tests__/$NAME.test.$EXT" "$DIR/../__tests__/$NAME.test.$EXT" "$DIR/../tests/$NAME.test.$EXT"; do
+                [ -f "$pattern" ] && FOUND_TEST=true && break
               done
               ;;
             py)
-              for pattern in \
-                "$DIR/test_$NAME.py" \
-                "$DIR/${NAME}_test.py" \
-                "$DIR/tests/test_$NAME.py" \
-                "$DIR/../tests/test_$NAME.py" \
-                "$DIR/tests/${NAME}_test.py"; do
-                if [ -f "$pattern" ]; then
-                  FOUND_TEST=true
-                  break
-                fi
+              for pattern in "$DIR/test_$NAME.py" "$DIR/${NAME}_test.py" "$DIR/tests/test_$NAME.py" "$DIR/../tests/test_$NAME.py"; do
+                [ -f "$pattern" ] && FOUND_TEST=true && break
               done
               ;;
-            go)
-              if [ -f "$DIR/${NAME}_test.go" ]; then
-                FOUND_TEST=true
-              fi
-              ;;
-            rs)
-              if grep -q '#\[cfg(test)\]' "$FILE_PATH" 2>/dev/null || [ -f "$DIR/../tests/$NAME.rs" ]; then
-                FOUND_TEST=true
-              fi
-              ;;
-            java|kt)
-              TEST_PATH=$(echo "$FILE_PATH" | sed 's|src/main|src/test|')
-              if [ -f "$TEST_PATH" ]; then
-                FOUND_TEST=true
-              fi
-              ;;
+            go) [ -f "$DIR/${NAME}_test.go" ] && FOUND_TEST=true ;;
+            rs) grep -q '#\[cfg(test)\]' "$FILE_PATH" 2>/dev/null && FOUND_TEST=true; [ -f "$DIR/../tests/$NAME.rs" ] && FOUND_TEST=true ;;
+            java|kt) [ -f "$(echo "$FILE_PATH" | sed 's|src/main|src/test|')" ] && FOUND_TEST=true ;;
           esac
 
-          if [ "$FOUND_TEST" = false ]; then
-            cat <<EOFWARN
-<tdd-violation>
-WARNING: No test file found for: $FILE_PATH
-IRON LAW: Every source file MUST have a corresponding test file.
-ACTION REQUIRED: Create the test file BEFORE continuing to the next task.
-Expected locations (pick one):
-EOFWARN
-            case "$EXT" in
-              ts|tsx|js|jsx)
-                echo "  - $DIR/$NAME.test.$EXT"
-                echo "  - $DIR/__tests__/$NAME.test.$EXT"
-                ;;
-              py)
-                echo "  - $DIR/test_$NAME.py"
-                echo "  - $DIR/tests/test_$NAME.py"
-                ;;
-              go)
-                echo "  - $DIR/${NAME}_test.go"
-                ;;
-              java|kt)
-                echo "  - $(echo "$FILE_PATH" | sed 's|src/main|src/test|')"
-                ;;
-              rs)
-                echo "  - Add #[cfg(test)] mod tests { } inline"
-                echo "  - $DIR/../tests/$NAME.rs"
-                ;;
-            esac
-            echo "</tdd-violation>"
-          fi
+          [ "$FOUND_TEST" = false ] && add_warning "TDD VIOLATION: No test file for $FILE_PATH. Create test BEFORE continuing. Expected: $DIR/$NAME.test.$EXT"
           ;;
-        *) ;;
       esac
     fi
 
-    # UI file screenshot reminder
+    # UI file verification
     case "$FILE_PATH" in
       *.tsx|*.jsx|*.vue|*.svelte|*.css|*.scss|*.html)
-        cat <<'EOF'
-<post-ui-change>
-UI file modified. Visually verify the rendered output before continuing.
-</post-ui-change>
-EOF
+        add_warning "UI CHANGE: Visually verify the rendered output before continuing."
         ;;
     esac
     ;;
 
+  Execute)
+    HAS_ERROR=false
+    if echo "$TOOL_OUTPUT" | grep -qE '(ERR!|SyntaxError|TypeError|ReferenceError|ModuleNotFoundError|ImportError|ENOENT|EPERM|segfault|panic:)' 2>/dev/null; then
+      HAS_ERROR=true
+    elif echo "$TOOL_OUTPUT" | grep -qE '(^error |^Error:|FAILED|FATAL|Traceback \(most recent|compile error|build failed)' 2>/dev/null; then
+      HAS_ERROR=true
+    elif echo "$TOOL_OUTPUT" | grep -qE '(exited with code [1-9]|exit status [1-9]|non-zero exit)' 2>/dev/null; then
+      HAS_ERROR=true
+    fi
+    [ "$HAS_ERROR" = true ] && add_warning "EXECUTION ERROR detected. Analyze root cause, fix, and re-run. Search web if stuck after 2-3 attempts."
+    ;;
 esac
+
+# === Context Degradation Warning ===
+if [ -f "$COUNTER_FILE" ]; then
+  CURRENT_COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
+  if [ "$CURRENT_COUNT" -ge 80 ] 2>/dev/null; then
+    add_warning "CONTEXT CRITICAL: $CURRENT_COUNT tool calls. Re-read ALL active files before any edit. Trust filesystem only."
+  elif [ "$CURRENT_COUNT" -ge 50 ] 2>/dev/null; then
+    add_warning "CONTEXT WARNING: $CURRENT_COUNT tool calls. Memory may be stale. Re-read files before editing."
+  fi
+fi
+
+# === OUTPUT: JSON additionalContext so Droid sees warnings ===
+if [ -n "$WARNINGS" ]; then
+  ESCAPED=$(printf '%s' "$WARNINGS" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')
+  cat <<EOFJ
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": $ESCAPED
+  }
+}
+EOFJ
+fi
 
 exit 0
